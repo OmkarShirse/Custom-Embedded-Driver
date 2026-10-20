@@ -34,6 +34,7 @@
 
 // ==================== SPI Offsets ====================
 #define SPI_CR1_OFFSET 0x00  // Control register 1
+#define SPI_SR_OFFSET  0x08  // Status register
 #define SPI_DR_OFFSET  0x0C  // Data register
 
 // ==================== I2C Offsets ====================
@@ -56,11 +57,30 @@
 
 // ==================== SPI Registers ====================
 #define SPI1_CR1 (*(volatile uint32_t*)(SPI1_BASE + SPI_CR1_OFFSET))
+#define SPI1_SR  (*(volatile uint32_t*)(SPI1_BASE + SPI_SR_OFFSET))
 #define SPI1_DR  (*(volatile uint32_t*)(SPI1_BASE + SPI_DR_OFFSET))
 
 // ==================== I2C Registers ====================
 #define I2C1_CR1 (*(volatile uint32_t*)(I2C1_BASE + I2C_CR1_OFFSET))
 #define I2C1_DR  (*(volatile uint32_t*)(I2C1_BASE + I2C_DR_OFFSET))
+
+// ==================== Peripheral Status Flags ====================
+// USART SR bits
+#define USART_SR_RXNE (1U << 5)  // Read data register not empty
+#define USART_SR_TC   (1U << 6)  // Transmission complete
+#define USART_SR_TXE  (1U << 7)  // Transmit data register empty
+
+// SPI SR bits
+#define SPI_SR_RXNE   (1U << 0)  // Receive buffer not empty
+#define SPI_SR_TXE    (1U << 1)  // Transmit buffer empty
+#define SPI_SR_BSY    (1U << 7)  // Busy flag
+
+// I2C SR1 bits
+#define I2C_SR1_SB    (1U << 0)  // Start bit generated
+#define I2C_SR1_ADDR  (1U << 1)  // Address sent/matched
+#define I2C_SR1_BTF   (1U << 2)  // Byte transfer finished
+#define I2C_SR1_RXNE  (1U << 6)  // Data register not empty (receivers)
+#define I2C_SR1_TXE   (1U << 7)  // Data register empty (transmitters)
 
 // ==================== Pin Macros ====================
 #define PIN0 0

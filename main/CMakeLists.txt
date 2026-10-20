@@ -1,0 +1,13 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "gpio.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        esp_rom
+        soc
+        log
+        freertos
+        esp_timer
+)
