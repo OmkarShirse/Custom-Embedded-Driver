@@ -1,76 +1,65 @@
-#include "gpio.h"
+#include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
 #include "esp_log.h"
-
-#define LED_A   GPIO_NUM_4
-#define LED_B   GPIO_NUM_5
-#define LED_C   GPIO_NUM_18
-#define BUTTON  GPIO_NUM_19
-
-#define LED_MASK ((1UL << LED_A) | (1UL << LED_B) | (1UL << LED_C))
+#include "esp_attr.h"
+#include "driver/gpio.h"
+#include "gpio_fast.h"
 
 static const char *TAG = "example";
 
+#define LED_A   4
+#define LED_B   5
+#define LED_C   18
+#define BUTTON  19
+#define BENCH_PIN LED_A
+#define N_ITER  100000u
+
+#define LED_MASK ((1UL << LED_A) | (1UL << LED_B) | (1UL << LED_C))
+
+static portMUX_TYPE bench_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static int64_t IRAM_ATTR bench_fast(void)
+{
+    portENTER_CRITICAL(&bench_lock);           /* no ISR jitter; ~10 ms, far below WDT */
+    int64_t t0 = esp_timer_get_time();
+    for (uint32_t i = 0; i < N_ITER; i++) { gpio_fast_set(BENCH_PIN); gpio_fast_clear(BENCH_PIN); }
+    int64_t t1 = esp_timer_get_time();
+    portEXIT_CRITICAL(&bench_lock);
+    return t1 - t0;
+}
+
+static int64_t IRAM_ATTR bench_idf(void)
+{
+    portENTER_CRITICAL(&bench_lock);
+    int64_t t0 = esp_timer_get_time();
+    for (uint32_t i = 0; i < N_ITER; i++) { gpio_set_level(BENCH_PIN, 1); gpio_set_level(BENCH_PIN, 0); }
+    int64_t t1 = esp_timer_get_time();
+    portEXIT_CRITICAL(&bench_lock);
+    return t1 - t0;
+}
+
 void app_main(void)
 {
-    /* One-time setup — validated, not latency-critical */
-    gpio_fast_config_mask(LED_MASK, GPIO_FAST_MODE_OUTPUT);
-    gpio_fast_config(BUTTON, GPIO_FAST_MODE_INPUT_PULLUP);
+    ESP_ERROR_CHECK(gpio_fast_config_mask(LED_MASK, GPIO_FAST_MODE_OUTPUT));
+    ESP_ERROR_CHECK(gpio_fast_config(BUTTON, GPIO_FAST_MODE_INPUT_PULLUP));
 
-    /* --- Single-pin hot path --- */
-    gpio_fast_set(LED_A);      // atomic, no lock, inlined to one instruction sequence
-    vTaskDelay(pdMS_TO_TICKS(200));
-    gpio_fast_clear(LED_A);
-
-    /* --- Batch hot path: all three LEDs toggled in ONE register write
-     * instead of three separate calls — no visible skew between them. --- */
     gpio_fast_set_mask(LED_MASK);
     vTaskDelay(pdMS_TO_TICKS(200));
     gpio_fast_clear_mask(LED_MASK);
+    gpio_fast_write_mask((1UL << LED_A) | (1UL << LED_C), 1UL << LED_B);
 
-    /* --- Mixed write: A and C on, B off, still just 2 register writes --- */
-    gpio_fast_write_mask((1UL << LED_A) | (1UL << LED_C), (1UL << LED_B));
+    /* per-iteration cost = set+clear pair, loop overhead included */
+    int64_t us_fast = bench_fast();
+    int64_t us_idf  = bench_idf();
+    ESP_LOGI(TAG, "fast: %" PRId64 " ns per set+clear", us_fast * 1000 / N_ITER);
+    ESP_LOGI(TAG, "idf : %" PRId64 " ns per set+clear", us_idf  * 1000 / N_ITER);
 
-    /* --- Reading input --- */
-    if (!gpio_fast_read(BUTTON)) { // pulled low = pressed
-        ESP_LOGI(TAG, "button pressed");
+    while (1) {
+        if (!gpio_fast_read(BUTTON)) {         /* active-low */
+            gpio_fast_toggle_mask_atomic(LED_MASK);
+        }
+        vTaskDelay(pdMS_TO_TICKS(250));
     }
-
-    /* --- Toggle: flip LED_A without knowing its current state --- */
-    for (int i = 0; i < 6; i++) {
-        gpio_fast_toggle(LED_A);   // blink 3 times
-        vTaskDelay(pdMS_TO_TICKS(150));
-    }
-
-    /* --- Batch toggle: all three LEDs flip state in two register writes --- */
-    gpio_fast_set_mask(LED_MASK);          // all on
-    vTaskDelay(pdMS_TO_TICKS(200));
-    gpio_fast_toggle_mask(LED_MASK);       // all off (toggled from on)
-    vTaskDelay(pdMS_TO_TICKS(200));
-    gpio_fast_toggle_mask(LED_MASK);       // all on again
-
-    /* --- Throughput demo: toggle LED_A as fast as possible and measure.
-     * With gpio_set_level() this loop is dominated by critical-section
-     * enter/exit; with gpio_fast_set/clear it's dominated by the actual
-     * register write latency. Compare by swapping the calls below. */
-    int64_t start = esp_timer_get_time();
-    const int N = 100000;
-    for (int i = 0; i < N; i++) {
-        gpio_fast_set(LED_A);
-        gpio_fast_clear(LED_A);
-    }
-    int64_t elapsed_us = esp_timer_get_time() - start;
-    ESP_LOGI(TAG, "%d toggles in %lld us (%.1f ns/toggle)",
-             N, elapsed_us, (elapsed_us * 1000.0) / N);
-
-    /* --- Toggle throughput: compare gpio_fast_toggle vs set+clear --- */
-    start = esp_timer_get_time();
-    for (int i = 0; i < N; i++) {
-        gpio_fast_toggle(LED_A);
-    }
-    elapsed_us = esp_timer_get_time() - start;
-    ESP_LOGI(TAG, "%d gpio_fast_toggle calls in %lld us (%.1f ns/call)",
-             N, elapsed_us, (elapsed_us * 1000.0) / N);
 }
