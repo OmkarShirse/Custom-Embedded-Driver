@@ -1,205 +1,140 @@
 #pragma once
-
+/*
+ * ESP32 register-level fast GPIO. Target: esp32 only (not S2/S3/C3: different regs).
+ *
+ * Rules:
+ *  - Hot-path fns are always_inline: they run from the CALLER's section.
+ *    For flash-cache-off safety, callers must be IRAM_ATTR.
+ *  - set/clear/write(pin)/set_mask/clear_mask: single W1TS/W1TC write -> atomic.
+ *  - toggle*: read-modify-write (ESP32 has no XOR reg). NOT atomic. Pin must have
+ *    one owner, or use *_atomic and make every writer of that pin use it.
+ *  - write_mask / toggle_mask = 2 APB writes: a brief mixed state is visible
+ *    on the pins between them. Clear is issued first, then set.
+ */
 #include <stdint.h>
 #include <stdbool.h>
-#include "esp_attr.h"     // IRAM_ATTR
-#include "soc/soc.h"      // REG_WRITE / REG_READ
-#include "soc/gpio_reg.h" // GPIO_OUT_REG etc.
 #include "esp_err.h"
+#include "soc/soc.h"
+#include "soc/gpio_reg.h"
+#include "freertos/FreeRTOS.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+#define GPIO_FAST_INLINE static inline __attribute__((always_inline))
+
+/* ESP32 pin map */
+#define GPIO_FAST_VALID_MASK0   0x0EEFFFFFUL /* 0-19,21-23,25-27 (no 20,24,28-31) */
+#define GPIO_FAST_FLASH_MASK0   0x00000FC0UL /* 6-11 SPI flash: refused */
+#define GPIO_FAST_VALID_MASK1   0x000000FFUL /* 32-39 -> bits 0-7 */
+#define GPIO_FAST_INONLY_MASK1  0x000000FCUL /* 34-39 input-only, no pulls */
+#define GPIO_FAST_WARN_MASK0    0x0003902FUL /* 0,1,2,3,5 strap/console, 12,15 strap, 16,17 PSRAM */
+
 typedef enum {
     GPIO_FAST_MODE_INPUT = 0,
-    GPIO_FAST_MODE_OUTPUT,
     GPIO_FAST_MODE_INPUT_PULLUP,
     GPIO_FAST_MODE_INPUT_PULLDOWN,
+    GPIO_FAST_MODE_OUTPUT,
 } gpio_fast_mode_t;
 
-/* ---- One-time setup (not latency-critical, full validation happens here) ---- */
-
-/**
- * Configure a single pin's direction, pull resistors, and route it through
- * the GPIO matrix as a simple GPIO (not a peripheral signal).
- * Call once at boot for every pin you intend to drive with the fast API.
- *
- * Returns ESP_ERR_INVALID_ARG for flash pins (6-11) or output mode on an
- * input-only pin (34-39).
- */
+/* ---- setup (not hot path) ---- */
 esp_err_t gpio_fast_config(uint8_t gpio_num, gpio_fast_mode_t mode);
-
-/**
- * Same as gpio_fast_config but for a batch of pins sharing the same mode.
- * Use this at startup instead of N calls to gpio_fast_config to configure
- * a whole bus/port in one go.
- */
+/* Validates ALL pins first; applies none on error. Use 1ULL<<n for pins >=32. */
 esp_err_t gpio_fast_config_mask(uint64_t pin_mask, gpio_fast_mode_t mode);
 
-/* ---- Hot path: single-pin ops (inlined, IRAM, no locks) ---- */
+extern portMUX_TYPE gpio_fast_lock;
 
-/** Drive `gpio_num` high. Atomic single register write. */
-static inline void IRAM_ATTR gpio_fast_set(uint8_t gpio_num)
+/* ---- single pin ---- */
+GPIO_FAST_INLINE void gpio_fast_set(uint8_t n)
 {
-    if (gpio_num < 32) {
-        REG_WRITE(GPIO_OUT_W1TS_REG, 1UL << gpio_num);
-    } else {
-        REG_WRITE(GPIO_OUT1_W1TS_REG, 1UL << (gpio_num - 32));
-    }
+    if (n < 32) REG_WRITE(GPIO_OUT_W1TS_REG,  (uint32_t)1 << n);
+    else        REG_WRITE(GPIO_OUT1_W1TS_REG, (uint32_t)1 << (n - 32));
 }
 
-/** Drive `gpio_num` low. Atomic single register write. */
-static inline void IRAM_ATTR gpio_fast_clear(uint8_t gpio_num)
+GPIO_FAST_INLINE void gpio_fast_clear(uint8_t n)
 {
-    if (gpio_num < 32) {
-        REG_WRITE(GPIO_OUT_W1TC_REG, 1UL << gpio_num);
-    } else {
-        REG_WRITE(GPIO_OUT1_W1TC_REG, 1UL << (gpio_num - 32));
-    }
+    if (n < 32) REG_WRITE(GPIO_OUT_W1TC_REG,  (uint32_t)1 << n);
+    else        REG_WRITE(GPIO_OUT1_W1TC_REG, (uint32_t)1 << (n - 32));
 }
 
-/** Set `gpio_num` to `level` (0 or nonzero). Branch is on a compile-time-
- *  knowable literal in most call sites, so it usually optimizes to a single
- *  register write anyway. */
-static inline void IRAM_ATTR gpio_fast_write(uint8_t gpio_num, bool level)
+GPIO_FAST_INLINE void gpio_fast_write(uint8_t n, bool lvl)
 {
-    if (level) {
-        gpio_fast_set(gpio_num);
-    } else {
-        gpio_fast_clear(gpio_num);
-    }
+    if (lvl) gpio_fast_set(n); else gpio_fast_clear(n);
 }
 
-/** Read the instantaneous input level of `gpio_num` (works for both input
- *  and output pins — output pins read back their driven state). */
-static inline bool IRAM_ATTR gpio_fast_read(uint8_t gpio_num)
+GPIO_FAST_INLINE bool gpio_fast_read(uint8_t n)
 {
-    if (gpio_num < 32) {
-        return (REG_READ(GPIO_IN_REG) >> gpio_num) & 0x1;
-    } else {
-        return (REG_READ(GPIO_IN1_REG) >> (gpio_num - 32)) & 0x1;
-    }
+    return (n < 32) ? ((REG_READ(GPIO_IN_REG)  >> n)        & 1u)
+                    : ((REG_READ(GPIO_IN1_REG) >> (n - 32)) & 1u);
 }
 
-/* ---- Hot path: batch ops on pins 0-31 (bank 0) ----
- * These are the real win: N pins toggled for the price of 1 register write
- * instead of N. Use a precomputed mask, e.g. (1UL<<4)|(1UL<<5)|(1UL<<18).
- */
-
-/** Set every pin present in `mask` (bank 0, pins 0-31) high, atomically and
- *  simultaneously — no glitch window between pins like a software loop
- *  would have. */
-static inline void IRAM_ATTR gpio_fast_set_mask(uint32_t mask)
+/* Reads the output latch (GPIO_OUT), not the pad. */
+GPIO_FAST_INLINE bool gpio_fast_get_out(uint8_t n)
 {
-    REG_WRITE(GPIO_OUT_W1TS_REG, mask);
+    return (n < 32) ? ((REG_READ(GPIO_OUT_REG)  >> n)        & 1u)
+                    : ((REG_READ(GPIO_OUT1_REG) >> (n - 32)) & 1u);
 }
 
-/** Clear every pin present in `mask` (bank 0, pins 0-31), atomically. */
-static inline void IRAM_ATTR gpio_fast_clear_mask(uint32_t mask)
+/* NOT atomic (RMW). Single-owner pins only. */
+GPIO_FAST_INLINE void gpio_fast_toggle(uint8_t n)
 {
-    REG_WRITE(GPIO_OUT_W1TC_REG, mask);
+    if (gpio_fast_get_out(n)) gpio_fast_clear(n); else gpio_fast_set(n);
 }
 
-/**
- * Write an arbitrary combination of pins high/low in bank 0 in exactly two
- * register writes total, regardless of how many pins are touched:
- *   set_mask  = pins that should go high
- *   clear_mask = pins that should go low
- * (set_mask & clear_mask should be 0; if a bit is in both, set wins because
- * it's applied second here — reorder the two REG_WRITE lines if you want
- * clear to win instead.)
- */
-static inline void IRAM_ATTR gpio_fast_write_mask(uint32_t set_mask, uint32_t clear_mask)
+GPIO_FAST_INLINE void gpio_fast_toggle_atomic(uint8_t n)
 {
-    REG_WRITE(GPIO_OUT_W1TC_REG, clear_mask);
-    REG_WRITE(GPIO_OUT_W1TS_REG, set_mask);
+    portENTER_CRITICAL_SAFE(&gpio_fast_lock);
+    gpio_fast_toggle(n);
+    portEXIT_CRITICAL_SAFE(&gpio_fast_lock);
 }
 
-/** Read all 32 pins of bank 0 (pins 0-31) in one register read. Mask off
- *  the bits you care about: (gpio_fast_read_bank0() >> 4) & 1 for pin 4. */
-static inline uint32_t IRAM_ATTR gpio_fast_read_bank0(void)
+/* ---- bank 0: GPIO0-31, mask bit n = GPIOn ---- */
+GPIO_FAST_INLINE void gpio_fast_set_mask(uint32_t m)   { REG_WRITE(GPIO_OUT_W1TS_REG, m); }
+GPIO_FAST_INLINE void gpio_fast_clear_mask(uint32_t m) { REG_WRITE(GPIO_OUT_W1TC_REG, m); }
+
+GPIO_FAST_INLINE void gpio_fast_write_mask(uint32_t set_m, uint32_t clr_m)
 {
-    return REG_READ(GPIO_IN_REG);
+    REG_WRITE(GPIO_OUT_W1TC_REG, clr_m);
+    REG_WRITE(GPIO_OUT_W1TS_REG, set_m);
 }
 
-/** Same as above for bank 1 (pins 32-39), returned right-aligned in bits
- *  0-7 of the result (bit 0 == GPIO32). */
-static inline uint32_t IRAM_ATTR gpio_fast_read_bank1(void)
+GPIO_FAST_INLINE void gpio_fast_toggle_mask(uint32_t m) /* RMW, not atomic */
 {
-    return REG_READ(GPIO_IN1_REG) & 0xFF;
+    uint32_t cur = REG_READ(GPIO_OUT_REG);
+    REG_WRITE(GPIO_OUT_W1TC_REG, cur & m);
+    REG_WRITE(GPIO_OUT_W1TS_REG, ~cur & m);
 }
 
-/** Toggle `gpio_num` output state. Reads current driven output register,
- *  then sets or clears accordingly — two register accesses but no CPU
- *  critical section required. Works for bank 0 and bank 1 pins. */
-static inline void IRAM_ATTR gpio_fast_toggle(uint8_t gpio_num)
+GPIO_FAST_INLINE void gpio_fast_toggle_mask_atomic(uint32_t m)
 {
-    if (gpio_num < 32) {
-        uint32_t out = REG_READ(GPIO_OUT_REG);
-        if (out & (1UL << gpio_num)) {
-            REG_WRITE(GPIO_OUT_W1TC_REG, 1UL << gpio_num);
-        } else {
-            REG_WRITE(GPIO_OUT_W1TS_REG, 1UL << gpio_num);
-        }
-    } else {
-        uint32_t out1 = REG_READ(GPIO_OUT1_REG);
-        if (out1 & (1UL << (gpio_num - 32))) {
-            REG_WRITE(GPIO_OUT1_W1TC_REG, 1UL << (gpio_num - 32));
-        } else {
-            REG_WRITE(GPIO_OUT1_W1TS_REG, 1UL << (gpio_num - 32));
-        }
-    }
+    portENTER_CRITICAL_SAFE(&gpio_fast_lock);
+    gpio_fast_toggle_mask(m);
+    portEXIT_CRITICAL_SAFE(&gpio_fast_lock);
 }
 
-/** Toggle every pin present in `mask` (bank 0, pins 0-31) in exactly two
- *  register writes — pins currently HIGH go LOW and vice versa, atomically
- *  within each bank. */
-static inline void IRAM_ATTR gpio_fast_toggle_mask(uint32_t mask)
+GPIO_FAST_INLINE uint32_t gpio_fast_read_bank0(void) { return REG_READ(GPIO_IN_REG); }
+
+/* ---- bank 1: GPIO32-39, mask bit 0 = GPIO32 ... bit 7 = GPIO39 ----
+ * Only GPIO32/33 can drive outputs; 34-39 are input-only. */
+GPIO_FAST_INLINE void gpio_fast_set_mask1(uint32_t m)   { REG_WRITE(GPIO_OUT1_W1TS_REG, m & 0xFFu); }
+GPIO_FAST_INLINE void gpio_fast_clear_mask1(uint32_t m) { REG_WRITE(GPIO_OUT1_W1TC_REG, m & 0xFFu); }
+
+GPIO_FAST_INLINE void gpio_fast_write_mask1(uint32_t set_m, uint32_t clr_m)
 {
-    uint32_t out = REG_READ(GPIO_OUT_REG);
-    uint32_t set = mask & ~out;  /* bits that are 0 → must go high */
-    uint32_t clr = mask &  out;  /* bits that are 1 → must go low  */
-    REG_WRITE(GPIO_OUT_W1TC_REG, clr);
-    REG_WRITE(GPIO_OUT_W1TS_REG, set);
+    REG_WRITE(GPIO_OUT1_W1TC_REG, clr_m & 0xFFu);
+    REG_WRITE(GPIO_OUT1_W1TS_REG, set_m & 0xFFu);
 }
 
-/* ---- Hot path: batch ops on pins 32-39 (bank 1) ----
- * Mirror of the bank-0 mask API but for the upper 8 GPIO pins.
- * Mask bits are right-aligned: bit 0 == GPIO32, bit 7 == GPIO39.
- * Only bits 0-7 are significant; upper bits are ignored.
- */
-
-/** Set every pin in `mask` (bank 1, pins 32-39) high, atomically. */
-static inline void IRAM_ATTR gpio_fast_set_mask1(uint32_t mask)
+GPIO_FAST_INLINE void gpio_fast_toggle_mask1(uint32_t m) /* RMW, not atomic */
 {
-    REG_WRITE(GPIO_OUT1_W1TS_REG, mask & 0xFF);
+    m &= 0xFFu;
+    uint32_t cur = REG_READ(GPIO_OUT1_REG);
+    REG_WRITE(GPIO_OUT1_W1TC_REG, cur & m);
+    REG_WRITE(GPIO_OUT1_W1TS_REG, ~cur & m);
 }
 
-/** Clear every pin in `mask` (bank 1, pins 32-39), atomically. */
-static inline void IRAM_ATTR gpio_fast_clear_mask1(uint32_t mask)
-{
-    REG_WRITE(GPIO_OUT1_W1TC_REG, mask & 0xFF);
-}
-
-/** Write bank 1 pins high/low in two register writes, same semantics as
- *  gpio_fast_write_mask() but for pins 32-39. */
-static inline void IRAM_ATTR gpio_fast_write_mask1(uint32_t set_mask, uint32_t clear_mask)
-{
-    REG_WRITE(GPIO_OUT1_W1TC_REG, clear_mask & 0xFF);
-    REG_WRITE(GPIO_OUT1_W1TS_REG, set_mask   & 0xFF);
-}
-
-/** Toggle every pin in `mask` (bank 1, pins 32-39). */
-static inline void IRAM_ATTR gpio_fast_toggle_mask1(uint32_t mask)
-{
-    uint32_t out1 = REG_READ(GPIO_OUT1_REG) & 0xFF;
-    uint32_t m    = mask & 0xFF;
-    uint32_t set  = m & ~out1;
-    uint32_t clr  = m &  out1;
-    REG_WRITE(GPIO_OUT1_W1TC_REG, clr);
-    REG_WRITE(GPIO_OUT1_W1TS_REG, set);
-}
+GPIO_FAST_INLINE uint32_t gpio_fast_read_bank1(void) { return REG_READ(GPIO_IN1_REG) & 0xFFu; }
 
 #ifdef __cplusplus
 }
