@@ -1,13 +1,6 @@
 idf_component_register(
-    SRCS
-        "main.c"
-        "gpio.c"
-    INCLUDE_DIRS
-        "."
-    REQUIRES
-        esp_rom
-        soc
-        log
-        freertos
-        esp_timer
+    SRCS "gpio_fast.c"
+    INCLUDE_DIRS "include"
+    REQUIRES soc esp_common freertos
+    PRIV_REQUIRES esp_rom log driver
 )
