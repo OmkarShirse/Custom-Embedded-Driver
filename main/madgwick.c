@@ -24,6 +24,43 @@ void madgwick_init(madgwick_filter_t *filter, float beta)
     filter->beta = (beta > 0.0f) ? beta : MADGWICK_DEFAULT_BETA;
 }
 
+void madgwick_init_from_accel(madgwick_filter_t *filter, float beta, float ax, float ay, float az)
+{
+    if (filter == NULL) return;
+    madgwick_init(filter, beta);
+
+    float norm = sqrtf(ax * ax + ay * ay + az * az);
+    if (norm < 0.01f) return;
+
+    ax /= norm;
+    ay /= norm;
+    az /= norm;
+
+    /* Calculate tilt orientation from gravity vector:
+     * roll = atan2(ay, az), pitch = atan2(-ax, sqrt(ay^2 + az^2)) */
+    float roll  = atan2f(ay, az);
+    float pitch = atan2f(-ax, sqrtf(ay * ay + az * az));
+
+    float cr = cosf(roll * 0.5f);
+    float sr = sinf(roll * 0.5f);
+    float cp = cosf(pitch * 0.5f);
+    float sp = sinf(pitch * 0.5f);
+
+    filter->q0 = cr * cp;
+    filter->q1 = sr * cp;
+    filter->q2 = cr * sp;
+    filter->q3 = -sr * sp;
+
+    float q_norm = sqrtf(filter->q0 * filter->q0 + filter->q1 * filter->q1 +
+                         filter->q2 * filter->q2 + filter->q3 * filter->q3);
+    if (q_norm > 0.0001f) {
+        filter->q0 /= q_norm;
+        filter->q1 /= q_norm;
+        filter->q2 /= q_norm;
+        filter->q3 /= q_norm;
+    }
+}
+
 void madgwick_set_beta(madgwick_filter_t *filter, float beta)
 {
     if (filter != NULL && beta >= 0.0f) {
@@ -125,17 +162,23 @@ void madgwick_get_euler_deg(const madgwick_filter_t *filter,
     float q2 = filter->q2;
     float q3 = filter->q3;
 
+    /* Pitch (y-axis rotation): test for gimbal lock at pitch = ±90° */
+    float sinp = 2.0f * (q0 * q2 - q3 * q1);
+    if (fabsf(sinp) >= 0.9999f) {
+        if (pitch != NULL) *pitch = copysignf(90.0f, sinp);
+        if (roll != NULL)  *roll  = 0.0f;
+        if (yaw != NULL)   *yaw   = -2.0f * atan2f(q1, q0) * RAD_TO_DEG;
+        return;
+    }
+
+    /* Pitch normal domain */
+    if (pitch != NULL) {
+        *pitch = asinf(sinp) * RAD_TO_DEG;
+    }
+
     /* Roll (x-axis rotation) */
     if (roll != NULL) {
         *roll = atan2f(2.0f * (q0 * q1 + q2 * q3), 1.0f - 2.0f * (q1 * q1 + q2 * q2)) * RAD_TO_DEG;
-    }
-
-    /* Pitch (y-axis rotation) with numerical clamp between -1 and +1 for asinf */
-    if (pitch != NULL) {
-        float sinp = 2.0f * (q0 * q2 - q3 * q1);
-        if (sinp > 1.0f)  sinp = 1.0f;
-        if (sinp < -1.0f) sinp = -1.0f;
-        *pitch = asinf(sinp) * RAD_TO_DEG;
     }
 
     /* Yaw (z-axis rotation) */

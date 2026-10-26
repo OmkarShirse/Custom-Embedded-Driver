@@ -40,6 +40,7 @@ typedef struct {
     int16_t gyro_x;     /**< Raw gyroscope X-axis */
     int16_t gyro_y;     /**< Raw gyroscope Y-axis */
     int16_t gyro_z;     /**< Raw gyroscope Z-axis */
+    int64_t timestamp_us; /**< Acquisition hardware timestamp in microseconds */
 } mpu6050_raw_data_t;
 
 /**
@@ -64,7 +65,7 @@ typedef struct {
     uint8_t accel_fs;       /**< Accelerometer full-scale range (e.g. MPU6050_ACCEL_FS_2G) */
     uint8_t gyro_fs;        /**< Gyroscope full-scale range (e.g. MPU6050_GYRO_FS_250DPS) */
     uint8_t dlpf_cfg;       /**< Digital Low-Pass Filter mode (e.g. MPU6050_DLPF_44HZ) */
-    uint8_t smplrt_div;     /**< Sample rate divider: SampleRate = GyroOutputRate / (1 + div) */
+    uint8_t smplrt_div;     /**< Sample rate divider: SampleRate = GyroRate / (1 + div). GyroRate is 8kHz if dlpf_cfg=0, 1kHz if dlpf_cfg=1..6 */
     bool enable_interrupt;  /**< Enable Data-Ready interrupt on INT pin */
 } mpu6050_config_t;
 

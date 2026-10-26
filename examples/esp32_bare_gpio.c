@@ -13,7 +13,10 @@
 #include <stdint.h>
 
 // ESP32 GPIO register base addresses
-#define DR_REG_GPIO_BASE 0x3FF44000
+#define DR_REG_GPIO_BASE   0x3FF44000
+#define DR_REG_IO_MUX_BASE 0x3FF49000
+
+#define IO_MUX_GPIO2_REG         (DR_REG_IO_MUX_BASE + 0x40)
 
 #define GPIO_ENABLE_REG          (DR_REG_GPIO_BASE + 0x20)
 #define GPIO_ENABLE_W1TS_REG     (DR_REG_GPIO_BASE + 0x24)
@@ -36,6 +39,9 @@ void delay(volatile uint32_t count) {
 
 void app_main(void)
 {
+    // Route IO_MUX pad function to simple GPIO (Function 2 on ESP32 IO_MUX)
+    REG_WRITE(IO_MUX_GPIO2_REG, (REG_READ(IO_MUX_GPIO2_REG) & ~(0x7 << 12)) | (2 << 12));
+
     // Enable GPIO2 as output
     REG_WRITE(GPIO_ENABLE_W1TS_REG, (1 << 2));
 

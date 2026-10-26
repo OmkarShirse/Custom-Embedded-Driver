@@ -107,7 +107,7 @@ Standard `gpio_set_level()` introduces significant latency due to function call 
 ```c
 gpio_fast_set(PIN_LED);        // Single APB write, 0 critical sections
 gpio_fast_clear(PIN_LED);      // Single APB write
-gpio_fast_toggle(PIN_LED);     // Atomic single-owner toggle
+gpio_fast_toggle(PIN_LED);     // Non-atomic RMW (single-owner toggle)
 gpio_fast_set_mask(LED_MASK);  // Turn on N pins in a single register write
 ```
 

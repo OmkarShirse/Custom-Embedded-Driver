@@ -33,19 +33,26 @@ void dht_high(void)       { PD_ODR |= (1 << DHT_PIN); }
 void dht_low(void)        { PD_ODR &= ~(1 << DHT_PIN); }
 uint8_t dht_read_pin(void){ return (PD_IDR & (1 << DHT_PIN)) ? 1 : 0; }
 
-uint8_t dht_read_byte(void) {
+int16_t dht_read_byte(void) {
     uint8_t byte = 0;
     for (uint8_t i = 0; i < 8; i++) {
-        while (!dht_read_pin());
+        uint16_t timeout = 10000;
+        while (!dht_read_pin()) {
+            if (--timeout == 0) return -1;
+        }
         delay_us(40);
         byte <<= 1;
         if (dht_read_pin()) byte |= 1;
-        while (dht_read_pin());
+        timeout = 10000;
+        while (dht_read_pin()) {
+            if (--timeout == 0) return -1;
+        }
     }
     return byte;
 }
 
 int8_t dht_read(uint8_t *humidity, uint8_t *temperature) {
+    if (humidity == 0 || temperature == 0) return -1;
     uint8_t data[5] = {0,0,0,0,0};
     dht_set_output();
     dht_low();
@@ -55,7 +62,11 @@ int8_t dht_read(uint8_t *humidity, uint8_t *temperature) {
     dht_set_input();
     delay_us(80);
     delay_us(80);
-    for (uint8_t i = 0; i < 5; i++) data[i] = dht_read_byte();
+    for (uint8_t i = 0; i < 5; i++) {
+        int16_t b = dht_read_byte();
+        if (b < 0) return -1;
+        data[i] = (uint8_t)b;
+    }
     dht_set_output();
     dht_high();
     if ((uint8_t)(data[0]+data[1]+data[2]+data[3]) != data[4]) return -1;
@@ -74,7 +85,7 @@ void alert_blink_fast(void) {
     }
 }
 
-int main() {
+void main(void) {
     uint8_t humidity, temperature;
 
     CLK_CKDIVR = 0;

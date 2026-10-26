@@ -144,7 +144,7 @@ esp_err_t i2c_master_write_burst(i2c_port_t port, uint8_t dev_addr, uint8_t star
     i2c_master_start(cmd);
     i2c_master_write_byte(cmd, (dev_addr << 1) | I2C_MASTER_WRITE, true);
     i2c_master_write_byte(cmd, start_reg, true);
-    i2c_master_write(cmd, (uint8_t *)buf, len, true);
+    i2c_master_write(cmd, buf, len, true);
     i2c_master_stop(cmd);
 
     esp_err_t ret = i2c_master_cmd_begin(port, cmd, pdMS_TO_TICKS(I2C_MASTER_TIMEOUT_MS));

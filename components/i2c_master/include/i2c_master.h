@@ -28,6 +28,10 @@ extern "C" {
 /**
  * @brief Initialize the I2C master peripheral with custom pin and speed settings.
  *
+ * NOTE: For 400 kHz Fast-mode operation, external pull-up resistors (2.2kΩ - 4.7kΩ)
+ * on SDA and SCL are mandatory. The ESP32 internal weak pull-ups (~45kΩ) do not meet
+ * Fast-mode rise time specifications (tr <= 300ns).
+ *
  * @param port         I2C port number (e.g. I2C_NUM_0)
  * @param sda_pin      GPIO number for SDA line
  * @param scl_pin      GPIO number for SCL line

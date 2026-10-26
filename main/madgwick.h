@@ -38,6 +38,19 @@ typedef struct {
 void madgwick_init(madgwick_filter_t *filter, float beta);
 
 /**
+ * @brief Initialize the Madgwick filter seeded from the initial accelerometer gravity vector.
+ *
+ * Accelerates convergence from 10-15s down to 0s upon boot.
+ *
+ * @param filter Pointer to filter struct
+ * @param beta   Filter gain
+ * @param ax     Initial accelerometer X
+ * @param ay     Initial accelerometer Y
+ * @param az     Initial accelerometer Z
+ */
+void madgwick_init_from_accel(madgwick_filter_t *filter, float beta, float ax, float ay, float az);
+
+/**
  * @brief Set the algorithm gain parameter beta.
  *
  * @param filter Pointer to filter struct

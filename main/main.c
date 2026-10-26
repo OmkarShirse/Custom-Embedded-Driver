@@ -83,9 +83,12 @@ static void sensor_task(void *pvParameters)
                                          MPU6050_I2C_ADDR_DEFAULT,
                                          &raw_sample);
         if (err == ESP_OK) {
+            /* Record timestamp immediately upon bus read completion */
+            raw_sample.timestamp_us = esp_timer_get_time();
+
             /* Transfer raw sample to processing queue */
-            if (xQueueSend(s_raw_queue, &raw_sample, 0) != pdPASS) {
-                /* Queue full: drop oldest or log overrun */
+            if (s_raw_queue != NULL) {
+                xQueueSend(s_raw_queue, &raw_sample, 0);
             }
         }
     }
@@ -122,11 +125,19 @@ static void processing_task(void *pvParameters)
     int64_t last_time_us = esp_timer_get_time();
     uint32_t count = 0;
 
+    /* Gyroscope stationary zero-rate bias calibration state */
+    bool calibrated = false;
+    uint16_t calib_samples = 0;
+    float gyro_bias_x = 0.0f;
+    float gyro_bias_y = 0.0f;
+    float gyro_bias_z = 0.0f;
+
     ESP_LOGI("processing_task", "Signal processing & DSP task started (Priority 2)");
 
     while (1) {
         if (xQueueReceive(s_raw_queue, &raw, portMAX_DELAY) == pdPASS) {
-            int64_t now_us = esp_timer_get_time();
+            /* Use acquisition timestamp to eliminate RTOS scheduling jitter */
+            int64_t now_us = (raw.timestamp_us > 0) ? raw.timestamp_us : esp_timer_get_time();
             float dt = (float)(now_us - last_time_us) / 1000000.0f;
             last_time_us = now_us;
             if (dt <= 0.0f || dt > 0.1f) {
@@ -141,16 +152,41 @@ static void processing_task(void *pvParameters)
             float ay_f = moving_avg_update(&filter_ay, scaled.ay_g);
             float az_f = moving_avg_update(&filter_az, scaled.az_g);
 
+            /* Boot-time zero-rate calibration: average first 200 samples */
+            if (!calibrated) {
+                gyro_bias_x += scaled.gx_dps;
+                gyro_bias_y += scaled.gy_dps;
+                gyro_bias_z += scaled.gz_dps;
+                calib_samples++;
+                if (calib_samples >= 200) {
+                    gyro_bias_x /= 200.0f;
+                    gyro_bias_y /= 200.0f;
+                    gyro_bias_z /= 200.0f;
+                    calibrated = true;
+                    /* Fast-seed Madgwick orientation from measured gravity */
+                    madgwick_init_from_accel(&madg_filter, 0.05f, ax_f, ay_f, az_f);
+                    ESP_LOGI("processing_task", "Gyro calibrated: bias=[%.2f, %.2f, %.2f] dps",
+                             gyro_bias_x, gyro_bias_y, gyro_bias_z);
+                } else {
+                    continue; /* Skip attitude output during initial calibration */
+                }
+            }
+
+            /* Subtract calibrated zero-rate DC bias */
+            float gx_corr = scaled.gx_dps - gyro_bias_x;
+            float gy_corr = scaled.gy_dps - gyro_bias_y;
+            float gz_corr = scaled.gz_dps - gyro_bias_z;
+
             /* 1. Complementary filter fusion for pitch and roll */
             complementary_filter_update(&comp_filter,
                                         ax_f, ay_f, az_f,
-                                        scaled.gx_dps, scaled.gy_dps,
+                                        gx_corr, gy_corr,
                                         dt);
 
             /* 2. Madgwick AHRS quaternion fusion */
-            float gx_rad = scaled.gx_dps * deg_to_rad;
-            float gy_rad = scaled.gy_dps * deg_to_rad;
-            float gz_rad = scaled.gz_dps * deg_to_rad;
+            float gx_rad = gx_corr * deg_to_rad;
+            float gy_rad = gy_corr * deg_to_rad;
+            float gz_rad = gz_corr * deg_to_rad;
             madgwick_update_6dof(&madg_filter, gx_rad, gy_rad, gz_rad, ax_f, ay_f, az_f, dt);
 
             /* Package telemetry */
@@ -167,13 +203,15 @@ static void processing_task(void *pvParameters)
             telem.ax_filtered_g  = ax_f;
             telem.ay_filtered_g  = ay_f;
             telem.az_filtered_g  = az_f;
-            telem.gx_dps         = scaled.gx_dps;
-            telem.gy_dps         = scaled.gy_dps;
-            telem.gz_dps         = scaled.gz_dps;
+            telem.gx_dps         = gx_corr;
+            telem.gy_dps         = gy_corr;
+            telem.gz_dps         = gz_corr;
             telem.temp_c         = scaled.temp_c;
             telem.sample_index   = ++count;
 
-            xQueueSend(s_telemetry_queue, &telem, 0);
+            if (s_telemetry_queue != NULL) {
+                xQueueSend(s_telemetry_queue, &telem, 0);
+            }
         }
     }
 }
@@ -188,6 +226,13 @@ static void telemetry_task(void *pvParameters)
 
     while (1) {
         if (xQueueReceive(s_telemetry_queue, &telem, portMAX_DELAY) == pdPASS) {
+            /* Poll button: assert activity LED when user presses button */
+            if (!gpio_fast_read(PIN_BUTTON)) {
+                gpio_fast_set(PIN_LED_ACTIVITY);
+            } else {
+                gpio_fast_clear(PIN_LED_ACTIVITY);
+            }
+
             /* Output formatted stream every 10 samples (approx 10Hz log rate at 100Hz sampling) */
             if ((telem.sample_index % 10) == 0) {
                 ESP_LOGI("IMU", "[#%05" PRIu32 "] Comp: [R:%5.1f° P:%5.1f°] | Madgwick: [R:%5.1f° P:%5.1f° Y:%5.1f°] | Quat:[%.2f, %.2f, %.2f, %.2f]",
@@ -207,31 +252,49 @@ static void telemetry_task(void *pvParameters)
 }
 
 /* ==================== Fast GPIO Benchmark Demo ==================== */
-static void run_gpio_benchmark(void)
-{
-    ESP_LOGI(TAG, "--- Running Register-Level Fast GPIO Benchmark ---");
-    const uint32_t N_ITER = 100000;
+static portMUX_TYPE s_bench_lock = portMUX_INITIALIZER_UNLOCKED;
 
+static int64_t IRAM_ATTR bench_fast_toggle(uint32_t iterations)
+{
+    portENTER_CRITICAL(&s_bench_lock);
     int64_t t0 = esp_timer_get_time();
-    for (uint32_t i = 0; i < N_ITER; i++) {
+    for (uint32_t i = 0; i < iterations; i++) {
         gpio_fast_set(PIN_LED_ACTIVITY);
         gpio_fast_clear(PIN_LED_ACTIVITY);
     }
     int64_t t1 = esp_timer_get_time();
-    int64_t fast_ns = ((t1 - t0) * 1000) / N_ITER;
+    portEXIT_CRITICAL(&s_bench_lock);
+    return t1 - t0;
+}
 
-    t0 = esp_timer_get_time();
-    for (uint32_t i = 0; i < N_ITER; i++) {
+static int64_t IRAM_ATTR bench_idf_toggle(uint32_t iterations)
+{
+    portENTER_CRITICAL(&s_bench_lock);
+    int64_t t0 = esp_timer_get_time();
+    for (uint32_t i = 0; i < iterations; i++) {
         gpio_set_level(PIN_LED_ACTIVITY, 1);
         gpio_set_level(PIN_LED_ACTIVITY, 0);
     }
-    t1 = esp_timer_get_time();
-    int64_t idf_ns = ((t1 - t0) * 1000) / N_ITER;
+    int64_t t1 = esp_timer_get_time();
+    portEXIT_CRITICAL(&s_bench_lock);
+    return t1 - t0;
+}
+
+static void run_gpio_benchmark(void)
+{
+    ESP_LOGI(TAG, "--- Running Register-Level Fast GPIO Benchmark (Isolated Critical Section) ---");
+    const uint32_t N_ITER = 100000;
+
+    int64_t fast_elapsed = bench_fast_toggle(N_ITER);
+    int64_t fast_ns = (fast_elapsed * 1000) / N_ITER;
+
+    int64_t idf_elapsed = bench_idf_toggle(N_ITER);
+    int64_t idf_ns = (idf_elapsed * 1000) / N_ITER;
 
     ESP_LOGI(TAG, "Fast GPIO set+clear: %" PRId64 " ns/pair", fast_ns);
     ESP_LOGI(TAG, "ESP-IDF   set+clear: %" PRId64 " ns/pair (%.1fx slower)",
              idf_ns, (float)idf_ns / (float)fast_ns);
-    ESP_LOGI(TAG, "--------------------------------------------------");
+    ESP_LOGI(TAG, "-------------------------------------------------------------------------------");
 }
 
 /* ==================== Application Entrypoint ==================== */
@@ -246,16 +309,45 @@ void app_main(void)
     ESP_ERROR_CHECK(gpio_fast_config_mask(led_mask, GPIO_FAST_MODE_OUTPUT));
     ESP_ERROR_CHECK(gpio_fast_config(PIN_BUTTON, GPIO_FAST_MODE_INPUT_PULLUP));
 
-    /* Run quick benchmark demo */
+    /* Run isolated benchmark demo before launching tasks */
     run_gpio_benchmark();
 
-    /* 2. Initialize Hardware I2C Master Bus */
+    /* 2. Create Inter-Task Communication Queues FIRST to avoid ISR null-dereference */
+    s_raw_queue       = xQueueCreate(10, sizeof(mpu6050_raw_data_t));
+    s_telemetry_queue = xQueueCreate(10, sizeof(imu_telemetry_t));
+
+    if (s_raw_queue == NULL || s_telemetry_queue == NULL) {
+        ESP_LOGE(TAG, "Failed to create FreeRTOS queues!");
+        return;
+    }
+
+    /* 3. Launch FreeRTOS Task Pipeline BEFORE attaching interrupts */
+    BaseType_t ret;
+    ret = xTaskCreatePinnedToCore(sensor_task,     "sensor_task",     3072, NULL, 3, &s_sensor_task_handle, 1);
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create sensor_task!");
+        return;
+    }
+
+    ret = xTaskCreatePinnedToCore(processing_task, "processing_task", 4096, NULL, 2, NULL,                  1);
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create processing_task!");
+        return;
+    }
+
+    ret = xTaskCreatePinnedToCore(telemetry_task,  "telemetry_task",  2560, NULL, 1, NULL,                  0);
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create telemetry_task!");
+        return;
+    }
+
+    /* 4. Initialize Hardware I2C Master Bus */
     ESP_ERROR_CHECK(i2c_master_init(I2C_MASTER_DEFAULT_PORT,
                                     PIN_I2C_SDA,
                                     PIN_I2C_SCL,
                                     I2C_MASTER_DEFAULT_FREQ_HZ));
 
-    /* 3. Initialize MPU6050 IMU Sensor */
+    /* 5. Initialize MPU6050 IMU Sensor */
     mpu6050_config_t imu_cfg = {
         .port             = I2C_MASTER_DEFAULT_PORT,
         .dev_addr         = MPU6050_I2C_ADDR_DEFAULT,
@@ -272,7 +364,7 @@ void app_main(void)
                  esp_err_to_name(err));
     }
 
-    /* 4. Configure GPIO Interrupt for MPU6050 INT pin */
+    /* 6. Configure GPIO Interrupt for MPU6050 INT pin only after queues and tasks exist */
     gpio_config_t int_conf = {
         .intr_type    = GPIO_INTR_POSEDGE,
         .pin_bit_mask = (1ULL << PIN_MPU_INT),
@@ -280,23 +372,12 @@ void app_main(void)
         .pull_down_en = GPIO_PULLDOWN_ENABLE,
         .pull_up_en   = GPIO_PULLUP_DISABLE,
     };
-    gpio_config(&int_conf);
-    gpio_install_isr_service(0);
-    gpio_isr_handler_add(PIN_MPU_INT, mpu6050_isr_handler, NULL);
-
-    /* 5. Create Inter-Task Communication Queues */
-    s_raw_queue       = xQueueCreate(10, sizeof(mpu6050_raw_data_t));
-    s_telemetry_queue = xQueueCreate(10, sizeof(imu_telemetry_t));
-
-    if (s_raw_queue == NULL || s_telemetry_queue == NULL) {
-        ESP_LOGE(TAG, "Failed to create FreeRTOS queues!");
-        return;
+    ESP_ERROR_CHECK(gpio_config(&int_conf));
+    esp_err_t isr_err = gpio_install_isr_service(0);
+    if (isr_err != ESP_OK && isr_err != ESP_ERR_INVALID_STATE) {
+        ESP_ERROR_CHECK(isr_err);
     }
-
-    /* 6. Launch FreeRTOS Task Pipeline */
-    xTaskCreatePinnedToCore(sensor_task,     "sensor_task",     3072, NULL, 3, &s_sensor_task_handle, 1);
-    xTaskCreatePinnedToCore(processing_task, "processing_task", 4096, NULL, 2, NULL,                  1);
-    xTaskCreatePinnedToCore(telemetry_task,  "telemetry_task",  2560, NULL, 1, NULL,                  0);
+    ESP_ERROR_CHECK(gpio_isr_handler_add(PIN_MPU_INT, mpu6050_isr_handler, NULL));
 
     ESP_LOGI(TAG, "All FreeRTOS pipeline tasks pinned and running!");
 }

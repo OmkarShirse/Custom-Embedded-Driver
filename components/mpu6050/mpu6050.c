@@ -27,8 +27,8 @@ esp_err_t mpu6050_test_connection(i2c_port_t port, uint8_t dev_addr)
 
 esp_err_t mpu6050_enable_data_ready_interrupt(i2c_port_t port, uint8_t dev_addr)
 {
-    /* INT pin config: Active High, Push-Pull, 50us pulse, clear on status read */
-    esp_err_t err = i2c_master_write_byte(port, dev_addr, MPU6050_REG_INT_PIN_CFG, 0x00);
+    /* INT pin config: Active High, Push-Pull, 50us pulse, clear on ANY read operation */
+    esp_err_t err = i2c_master_write_byte(port, dev_addr, MPU6050_REG_INT_PIN_CFG, MPU6050_INT_CFG_INT_RD_CLEAR);
     if (err != ESP_OK) return err;
 
     /* Enable DATA_RDY_EN (bit 0) */
@@ -130,7 +130,7 @@ void mpu6050_scale_data(const mpu6050_raw_data_t *raw,
                         float accel_sens,
                         float gyro_sens)
 {
-    if (raw == NULL || scaled == NULL) {
+    if (raw == NULL || scaled == NULL || accel_sens <= 0.0f || gyro_sens <= 0.0f) {
         return;
     }
 
