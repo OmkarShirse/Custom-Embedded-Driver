@@ -1,6 +1,6 @@
 # Examples
 
-Standalone C examples that demonstrate register-level GPIO/peripheral programming concepts, complementary to the main `gpio.h` fast-path driver.
+Standalone C examples that demonstrate register-level GPIO/peripheral programming concepts, complementary to the main `gpio_fast.h` fast-path driver.
 
 ---
 

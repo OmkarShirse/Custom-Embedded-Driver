@@ -3,11 +3,11 @@
  * @brief Bare-metal ESP32 GPIO blink — direct register access without ESP-IDF gpio driver
  *
  * Demonstrates manual W1TS/W1TC register manipulation on GPIO2 (built-in LED).
- * This is the low-level foundation that gpio.h builds on, useful as a
+ * This is the low-level foundation that gpio_fast.h builds on, useful as a
  * reference when porting to bare-metal environments or understanding the
  * hardware before using the higher-level fast-path API.
  *
- * NOTE: In production use gpio.h instead — it adds IRAM_ATTR, validation,
+ * NOTE: In production use gpio_fast.h instead — it adds IRAM_ATTR, validation,
  *       and a cleaner API over the same underlying registers.
  */
 #include <stdint.h>
