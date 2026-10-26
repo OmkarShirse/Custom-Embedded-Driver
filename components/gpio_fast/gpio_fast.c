@@ -58,11 +58,11 @@ static void apply(uint8_t n, gpio_fast_mode_t mode)
     if (mode == GPIO_FAST_MODE_OUTPUT) {
         /* detach any peripheral signal, route simple GPIO_OUT to pad */
         esp_rom_gpio_connect_out_signal(n, SIG_GPIO_OUT_IDX, false, false);
-        if (n < 32) REG_WRITE(GPIO_ENABLE_W1TS_REG,  (uint32_t)1 << n);
-        else        REG_WRITE(GPIO_ENABLE1_W1TS_REG, (uint32_t)1 << (n - 32));
+        if (n < 32) REG_WRITE(GPIO_ENABLE_W1TS_REG,  (uint32_t)1 << (n & 0x1Fu));
+        else        REG_WRITE(GPIO_ENABLE1_W1TS_REG, (uint32_t)1 << ((n - 32) & 0x1Fu));
     } else {
-        if (n < 32) REG_WRITE(GPIO_ENABLE_W1TC_REG,  (uint32_t)1 << n);
-        else        REG_WRITE(GPIO_ENABLE1_W1TC_REG, (uint32_t)1 << (n - 32));
+        if (n < 32) REG_WRITE(GPIO_ENABLE_W1TC_REG,  (uint32_t)1 << (n & 0x1Fu));
+        else        REG_WRITE(GPIO_ENABLE1_W1TC_REG, (uint32_t)1 << ((n - 32) & 0x1Fu));
     }
 }
 

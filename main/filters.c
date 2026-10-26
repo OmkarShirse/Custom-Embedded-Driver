@@ -11,11 +11,12 @@ void moving_avg_init(moving_avg_filter_t *f, float *buffer, size_t capacity)
 {
     if (f == NULL || buffer == NULL || capacity == 0) return;
 
-    f->buffer   = buffer;
-    f->capacity = capacity;
-    f->count    = 0;
-    f->head     = 0;
-    f->sum      = 0.0f;
+    f->buffer     = buffer;
+    f->capacity   = capacity;
+    f->count      = 0;
+    f->head       = 0;
+    f->sum        = 0.0f;
+    f->resync_ctr = 0;
 
     for (size_t i = 0; i < capacity; i++) {
         f->buffer[i] = 0.0f;
@@ -42,8 +43,7 @@ float moving_avg_update(moving_avg_filter_t *f, float new_val)
     f->head = (f->head + 1) % f->capacity;
 
     /* Periodic re-accumulation to prevent cumulative single-precision float drift */
-    static uint16_t resync_ctr = 0;
-    if ((++resync_ctr & 0x00FF) == 0) {
+    if ((++f->resync_ctr & 0x00FF) == 0) {
         float exact_sum = 0.0f;
         for (size_t i = 0; i < f->capacity; i++) {
             exact_sum += f->buffer[i];
@@ -77,6 +77,12 @@ void complementary_filter_update(complementary_filter_t *f,
         /* In free fall, trust gyroscope integration only */
         f->roll_deg  += gx * dt;
         f->pitch_deg += gy * dt;
+
+        if (f->pitch_deg > 90.0f)  f->pitch_deg = 90.0f;
+        if (f->pitch_deg < -90.0f) f->pitch_deg = -90.0f;
+
+        while (f->roll_deg > 180.0f)  f->roll_deg -= 360.0f;
+        while (f->roll_deg < -180.0f) f->roll_deg += 360.0f;
         return;
     }
 
@@ -95,18 +101,14 @@ void complementary_filter_update(complementary_filter_t *f,
         return;
     }
 
-    /* Phase-unwrapped angular difference to eliminate wrap-around jump across ±180° */
-    float diff_roll = accel_roll - f->roll_deg;
-    while (diff_roll > 180.0f)  diff_roll -= 360.0f;
-    while (diff_roll < -180.0f) diff_roll += 360.0f;
+    /* Complementary filter fusion: standard form
+     * angle = alpha * (angle + gyro * dt) + (1 - alpha) * accel_angle */
+    f->roll_deg  = f->alpha * (f->roll_deg  + gx * dt) + (1.0f - f->alpha) * accel_roll;
+    f->pitch_deg = f->alpha * (f->pitch_deg + gy * dt) + (1.0f - f->alpha) * accel_pitch;
 
-    float diff_pitch = accel_pitch - f->pitch_deg;
-    while (diff_pitch > 180.0f)  diff_pitch -= 360.0f;
-    while (diff_pitch < -180.0f) diff_pitch += 360.0f;
-
-    /* Complementary filter update with angular difference */
-    f->roll_deg  += (gx * dt) + (1.0f - f->alpha) * diff_roll;
-    f->pitch_deg += (gy * dt) + (1.0f - f->alpha) * diff_pitch;
+    /* Clamp pitch to [-90, +90] */
+    if (f->pitch_deg > 90.0f)  f->pitch_deg = 90.0f;
+    if (f->pitch_deg < -90.0f) f->pitch_deg = -90.0f;
 
     /* Keep roll bounded in [-180, +180] */
     while (f->roll_deg > 180.0f)  f->roll_deg -= 360.0f;

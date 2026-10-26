@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <inttypes.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -24,6 +25,8 @@ static const char *TAG = "app_main";
 
 #define PIN_I2C_SDA         GPIO_NUM_21     /* I2C Master SDA */
 #define PIN_I2C_SCL         GPIO_NUM_22     /* I2C Master SCL */
+
+#define GYRO_CALIB_MAX_RATE_DPS 5.0f        /* [ASSUMPTION] Maximum allowable angular rate during stationary calibration */
 
 /* ==================== FreeRTOS Pipeline Structs & Handles ==================== */
 typedef struct {
@@ -154,6 +157,17 @@ static void processing_task(void *pvParameters)
 
             /* Boot-time zero-rate calibration: average first 200 samples */
             if (!calibrated) {
+                if (fabsf(scaled.gx_dps) > GYRO_CALIB_MAX_RATE_DPS ||
+                    fabsf(scaled.gy_dps) > GYRO_CALIB_MAX_RATE_DPS ||
+                    fabsf(scaled.gz_dps) > GYRO_CALIB_MAX_RATE_DPS) {
+                    /* Discard window if sample rate exceeds threshold and restart accumulation */
+                    gyro_bias_x = 0.0f;
+                    gyro_bias_y = 0.0f;
+                    gyro_bias_z = 0.0f;
+                    calib_samples = 0;
+                    continue;
+                }
+
                 gyro_bias_x += scaled.gx_dps;
                 gyro_bias_y += scaled.gy_dps;
                 gyro_bias_z += scaled.gz_dps;
@@ -252,31 +266,25 @@ static void telemetry_task(void *pvParameters)
 }
 
 /* ==================== Fast GPIO Benchmark Demo ==================== */
-static portMUX_TYPE s_bench_lock = portMUX_INITIALIZER_UNLOCKED;
-
 static int64_t IRAM_ATTR bench_fast_toggle(uint32_t iterations)
 {
-    portENTER_CRITICAL(&s_bench_lock);
     int64_t t0 = esp_timer_get_time();
     for (uint32_t i = 0; i < iterations; i++) {
         gpio_fast_set(PIN_LED_ACTIVITY);
         gpio_fast_clear(PIN_LED_ACTIVITY);
     }
     int64_t t1 = esp_timer_get_time();
-    portEXIT_CRITICAL(&s_bench_lock);
     return t1 - t0;
 }
 
 static int64_t IRAM_ATTR bench_idf_toggle(uint32_t iterations)
 {
-    portENTER_CRITICAL(&s_bench_lock);
     int64_t t0 = esp_timer_get_time();
     for (uint32_t i = 0; i < iterations; i++) {
         gpio_set_level(PIN_LED_ACTIVITY, 1);
         gpio_set_level(PIN_LED_ACTIVITY, 0);
     }
     int64_t t1 = esp_timer_get_time();
-    portEXIT_CRITICAL(&s_bench_lock);
     return t1 - t0;
 }
 

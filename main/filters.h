@@ -29,6 +29,7 @@ typedef struct {
     size_t count;       /**< Current number of valid samples */
     size_t head;        /**< Write index in circular ring */
     float sum;          /**< Running sum for O(1) average calculation */
+    uint16_t resync_ctr;/**< Counter for periodic exact-sum re-accumulation */
 } moving_avg_filter_t;
 
 /**

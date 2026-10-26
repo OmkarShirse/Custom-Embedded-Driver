@@ -60,8 +60,18 @@ int8_t dht_read(uint8_t *humidity, uint8_t *temperature) {
     dht_high();
     delay_us(30);
     dht_set_input();
-    delay_us(80);
-    delay_us(80);
+    uint16_t timeout = 10000;
+    while (dht_read_pin()) {
+        if (--timeout == 0) return -1;
+    }
+    timeout = 10000;
+    while (!dht_read_pin()) {
+        if (--timeout == 0) return -1;
+    }
+    timeout = 10000;
+    while (dht_read_pin()) {
+        if (--timeout == 0) return -1;
+    }
     for (uint8_t i = 0; i < 5; i++) {
         int16_t b = dht_read_byte();
         if (b < 0) return -1;

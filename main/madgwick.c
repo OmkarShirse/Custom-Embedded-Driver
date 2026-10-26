@@ -167,7 +167,7 @@ void madgwick_get_euler_deg(const madgwick_filter_t *filter,
     if (fabsf(sinp) >= 0.9999f) {
         if (pitch != NULL) *pitch = copysignf(90.0f, sinp);
         if (roll != NULL)  *roll  = 0.0f;
-        if (yaw != NULL)   *yaw   = -2.0f * atan2f(q1, q0) * RAD_TO_DEG;
+        if (yaw != NULL)   *yaw   = (sinp > 0.0f ? -2.0f : 2.0f) * atan2f(q1, q0) * RAD_TO_DEG;
         return;
     }
 

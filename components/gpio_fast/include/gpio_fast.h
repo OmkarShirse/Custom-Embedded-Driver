@@ -48,12 +48,14 @@ extern portMUX_TYPE gpio_fast_lock;
 /* ---- single pin ---- */
 GPIO_FAST_INLINE void gpio_fast_set(uint8_t n)
 {
+    if (n > 39) return;
     if (n < 32) REG_WRITE(GPIO_OUT_W1TS_REG,  (uint32_t)1 << (n & 0x1Fu));
     else        REG_WRITE(GPIO_OUT1_W1TS_REG, (uint32_t)1 << ((n - 32) & 0x1Fu));
 }
 
 GPIO_FAST_INLINE void gpio_fast_clear(uint8_t n)
 {
+    if (n > 39) return;
     if (n < 32) REG_WRITE(GPIO_OUT_W1TC_REG,  (uint32_t)1 << (n & 0x1Fu));
     else        REG_WRITE(GPIO_OUT1_W1TC_REG, (uint32_t)1 << ((n - 32) & 0x1Fu));
 }
@@ -65,6 +67,7 @@ GPIO_FAST_INLINE void gpio_fast_write(uint8_t n, bool lvl)
 
 GPIO_FAST_INLINE bool gpio_fast_read(uint8_t n)
 {
+    if (n > 39) return 0;
     return (n < 32) ? ((REG_READ(GPIO_IN_REG)  >> (n & 0x1Fu))        & 1u)
                     : ((REG_READ(GPIO_IN1_REG) >> ((n - 32) & 0x1Fu)) & 1u);
 }
@@ -72,6 +75,7 @@ GPIO_FAST_INLINE bool gpio_fast_read(uint8_t n)
 /* Reads the output latch (GPIO_OUT), not the pad. */
 GPIO_FAST_INLINE bool gpio_fast_get_out(uint8_t n)
 {
+    if (n > 39) return 0;
     return (n < 32) ? ((REG_READ(GPIO_OUT_REG)  >> (n & 0x1Fu))        & 1u)
                     : ((REG_READ(GPIO_OUT1_REG) >> ((n - 32) & 0x1Fu)) & 1u);
 }
