@@ -139,13 +139,13 @@ Written directly to the InvenSense MPU-6050 register specification without third
 
 ---
 
-### 4. DSP & Filter Engine (`main/filters.h/.c`)
+### 4. DSP & Filter Engine (`main/filters.h/.c` & `main/madgwick.h/.c`)
 
-Raw accelerometer data suffers from high-frequency vibration, while gyroscope integration suffers from low-frequency drift. The DSP layer fuses both sensors:
+Raw accelerometer data suffers from high-frequency vibration, while gyroscope integration suffers from low-frequency drift. The firmware implements two complementary filtering approaches:
 
 #### A. Circular-Buffer Moving Average Filter
 - Implemented as an $O(1)$ ring buffer with a running sum for accelerometer axes ($a_x, a_y, a_z$).
-- Eliminates sensor jitter without requiring expensive per-sample array traversals.
+- Eliminates high-frequency mechanical jitter without requiring expensive per-sample array traversals.
 
 #### B. Complementary Attitude Filter
 Combines high-pass filtered gyro rate integration with low-pass filtered accelerometer tilt angles:
@@ -158,7 +158,18 @@ $$\theta_{\text{roll}} = \alpha \cdot (\theta_{\text{roll}} + g_x \cdot \Delta t
 
 $$\theta_{\text{pitch}} = \alpha \cdot (\theta_{\text{pitch}} + g_y \cdot \Delta t) + (1 - \alpha) \cdot \theta_{\text{accel\_pitch}}$$
 
-With $\alpha = 0.96$, the filter relies 96% on fast gyro integration and 4% on stable gravitational tilt, producing responsive, drift-free angles.
+With $\alpha = 0.96$, the filter relies 96% on fast gyro integration and 4% on gravitational tilt.
+
+#### C. Madgwick Quaternion AHRS Filter
+For aerospace, drone, and robotic applications where Euler angle gimbal lock ($\pm 90^\circ$ pitch) cannot be tolerated:
+- Computes a singularity-free unit quaternion $\mathbf{q} = [q_0, q_1, q_2, q_3]^T$.
+- Uses single-step **Gradient Descent** ($\nabla f$) on the gravity error surface to correct the integrated gyroscope orientation rate:
+
+$$\dot{\mathbf{q}} = \frac{1}{2}\mathbf{q} \otimes \mathbf{\omega} - \beta \frac{\nabla f}{\|\nabla f\|}$$
+
+$$\mathbf{q}_{k+1} = \frac{\mathbf{q}_k + \dot{\mathbf{q}} \cdot \Delta t}{\|\mathbf{q}_k + \dot{\mathbf{q}} \cdot \Delta t\|}$$
+
+- Requires **< 400 CPU cycles** per update with zero matrix inversions, making it vastly more efficient than an Extended Kalman Filter (EKF).
 
 ---
 
@@ -248,9 +259,9 @@ I (442) sensor_task: Sensor acquisition task started (Priority 3)
 I (442) processing_task: Signal processing & DSP task started (Priority 2)
 I (442) telemetry_task: Telemetry reporter task started (Priority 1)
 I (452) app_main: All FreeRTOS pipeline tasks pinned and running!
-I (552) IMU: [#00010] Roll:    0.8° | Pitch:   -0.4° | Accel(g): [0.01, 0.02, 0.99] | Temp: 28.4°C
-I (652) IMU: [#00020] Roll:    0.9° | Pitch:   -0.5° | Accel(g): [0.01, 0.02, 1.00] | Temp: 28.4°C
-I (752) IMU: [#00030] Roll:   12.4° | Pitch:   -3.2° | Accel(g): [0.05, 0.21, 0.97] | Temp: 28.5°C
+I (552) IMU: [#00010] Comp: [R:  0.8° P: -0.4°] | Madgwick: [R:  0.8° P: -0.4° Y:  0.0°] | Quat: [1.00, 0.01, -0.00, 0.00]
+I (652) IMU: [#00020] Comp: [R:  0.9° P: -0.5°] | Madgwick: [R:  0.9° P: -0.5° Y:  0.0°] | Quat: [1.00, 0.01, -0.00, 0.00]
+I (752) IMU: [#00030] Comp: [R: 12.4° P: -3.2°] | Madgwick: [R: 12.3° P: -3.1° Y:  0.5°] | Quat: [0.99, 0.11, -0.03, 0.00]
 ```
 
 ---

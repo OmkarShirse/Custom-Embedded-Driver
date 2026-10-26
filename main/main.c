@@ -12,6 +12,7 @@
 #include "i2c_master.h"
 #include "mpu6050.h"
 #include "filters.h"
+#include "madgwick.h"
 
 static const char *TAG = "app_main";
 
@@ -26,14 +27,26 @@ static const char *TAG = "app_main";
 
 /* ==================== FreeRTOS Pipeline Structs & Handles ==================== */
 typedef struct {
-    float roll_deg;
-    float pitch_deg;
+    /* Complementary filter angles */
+    float comp_roll_deg;
+    float comp_pitch_deg;
+
+    /* Madgwick AHRS quaternion & angles */
+    float madg_roll_deg;
+    float madg_pitch_deg;
+    float madg_yaw_deg;
+    float q0, q1, q2, q3;
+
+    /* Filtered linear acceleration (g) */
     float ax_filtered_g;
     float ay_filtered_g;
     float az_filtered_g;
+
+    /* Angular velocity (°/s) */
     float gx_dps;
     float gy_dps;
     float gz_dps;
+
     float temp_c;
     uint32_t sample_index;
 } imu_telemetry_t;
@@ -101,6 +114,11 @@ static void processing_task(void *pvParameters)
     complementary_filter_t comp_filter;
     complementary_filter_init(&comp_filter, 0.96f);
 
+    /* Madgwick quaternion AHRS filter: beta = 0.05 */
+    madgwick_filter_t madg_filter;
+    madgwick_init(&madg_filter, 0.05f);
+
+    const float deg_to_rad = 3.14159265358979323846f / 180.0f;
     int64_t last_time_us = esp_timer_get_time();
     uint32_t count = 0;
 
@@ -123,23 +141,37 @@ static void processing_task(void *pvParameters)
             float ay_f = moving_avg_update(&filter_ay, scaled.ay_g);
             float az_f = moving_avg_update(&filter_az, scaled.az_g);
 
-            /* Complementary filter fusion for pitch and roll */
+            /* 1. Complementary filter fusion for pitch and roll */
             complementary_filter_update(&comp_filter,
                                         ax_f, ay_f, az_f,
                                         scaled.gx_dps, scaled.gy_dps,
                                         dt);
 
+            /* 2. Madgwick AHRS quaternion fusion */
+            float gx_rad = scaled.gx_dps * deg_to_rad;
+            float gy_rad = scaled.gy_dps * deg_to_rad;
+            float gz_rad = scaled.gz_dps * deg_to_rad;
+            madgwick_update_6dof(&madg_filter, gx_rad, gy_rad, gz_rad, ax_f, ay_f, az_f, dt);
+
             /* Package telemetry */
-            telem.roll_deg      = comp_filter.roll_deg;
-            telem.pitch_deg     = comp_filter.pitch_deg;
-            telem.ax_filtered_g = ax_f;
-            telem.ay_filtered_g = ay_f;
-            telem.az_filtered_g = az_f;
-            telem.gx_dps        = scaled.gx_dps;
-            telem.gy_dps        = scaled.gy_dps;
-            telem.gz_dps        = scaled.gz_dps;
-            telem.temp_c        = scaled.temp_c;
-            telem.sample_index  = ++count;
+            telem.comp_roll_deg  = comp_filter.roll_deg;
+            telem.comp_pitch_deg = comp_filter.pitch_deg;
+
+            madgwick_get_euler_deg(&madg_filter,
+                                   &telem.madg_roll_deg,
+                                   &telem.madg_pitch_deg,
+                                   &telem.madg_yaw_deg);
+            madgwick_get_quaternion(&madg_filter,
+                                    &telem.q0, &telem.q1, &telem.q2, &telem.q3);
+
+            telem.ax_filtered_g  = ax_f;
+            telem.ay_filtered_g  = ay_f;
+            telem.az_filtered_g  = az_f;
+            telem.gx_dps         = scaled.gx_dps;
+            telem.gy_dps         = scaled.gy_dps;
+            telem.gz_dps         = scaled.gz_dps;
+            telem.temp_c         = scaled.temp_c;
+            telem.sample_index   = ++count;
 
             xQueueSend(s_telemetry_queue, &telem, 0);
         }
@@ -158,14 +190,14 @@ static void telemetry_task(void *pvParameters)
         if (xQueueReceive(s_telemetry_queue, &telem, portMAX_DELAY) == pdPASS) {
             /* Output formatted stream every 10 samples (approx 10Hz log rate at 100Hz sampling) */
             if ((telem.sample_index % 10) == 0) {
-                ESP_LOGI("IMU", "[#%05" PRIu32 "] Roll: %6.1f° | Pitch: %6.1f° | Accel(g): [%.2f, %.2f, %.2f] | Temp: %.1f°C",
+                ESP_LOGI("IMU", "[#%05" PRIu32 "] Comp: [R:%5.1f° P:%5.1f°] | Madgwick: [R:%5.1f° P:%5.1f° Y:%5.1f°] | Quat:[%.2f, %.2f, %.2f, %.2f]",
                          telem.sample_index,
-                         telem.roll_deg,
-                         telem.pitch_deg,
-                         telem.ax_filtered_g,
-                         telem.ay_filtered_g,
-                         telem.az_filtered_g,
-                         telem.temp_c);
+                         telem.comp_roll_deg,
+                         telem.comp_pitch_deg,
+                         telem.madg_roll_deg,
+                         telem.madg_pitch_deg,
+                         telem.madg_yaw_deg,
+                         telem.q0, telem.q1, telem.q2, telem.q3);
 
                 /* Toggle heartbeat status LED using register-level fast GPIO */
                 gpio_fast_toggle(PIN_LED_HEARTBEAT);
